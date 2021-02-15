@@ -203,7 +203,8 @@ class DDPG(OffPolicyRLModel):
                  return_range=(-np.inf, np.inf), actor_lr=1e-4, critic_lr=1e-3, clip_norm=None, reward_scale=1.,
                  render=False, render_eval=False, memory_limit=None, buffer_size=50000, random_exploration=0.0,
                  verbose=0, tensorboard_log=None, _init_setup_model=True, policy_kwargs=None,
-                 full_tensorboard_log=False, seed=None, n_cpu_tf_sess=1):
+                 full_tensorboard_log=False, seed=None, n_cpu_tf_sess=1, rb_path=None, no_store=False,
+                 load_rb=False):
 
         super(DDPG, self).__init__(policy=policy, env=env, replay_buffer=None,
                                    verbose=verbose, policy_base=DDPGPolicy,
@@ -249,6 +250,9 @@ class DDPG(OffPolicyRLModel):
         self.tensorboard_log = tensorboard_log
         self.full_tensorboard_log = full_tensorboard_log
         self.random_exploration = random_exploration
+        self.rb_path = rb_path
+        self.no_store = no_store
+        self.load_rb = load_rb
 
         # init
         self.graph = None
@@ -328,6 +332,10 @@ class DDPG(OffPolicyRLModel):
                 self.sess = tf_util.make_session(num_cpu=self.n_cpu_tf_sess, graph=self.graph)
 
                 self.replay_buffer = ReplayBuffer(self.buffer_size)
+                if self.load_rb:
+                    with open(self.rb_path, 'rb') as replay_buffer:
+                        self.replay_buffer = pickle.load(replay_buffer)
+                        print(len(self.replay_buffer.storage))
 
                 with tf.variable_scope("input", reuse=False):
                     # Observation normalization.
@@ -805,7 +813,7 @@ class DDPG(OffPolicyRLModel):
             })
 
     def learn(self, total_timesteps, callback=None, log_interval=100, tb_log_name="DDPG",
-              reset_num_timesteps=True, replay_wrapper=None):
+              reset_num_timesteps=True, replay_wrapper=None, save_path=None, save_interval=None):
 
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
         callback = self._init_callback(callback)
@@ -916,7 +924,8 @@ class DDPG(OffPolicyRLModel):
                                 # Avoid changing the original ones
                                 obs_, new_obs_, reward_ = obs, new_obs, reward
 
-                            self._store_transition(obs_, action, reward_, new_obs_, done, info)
+                            if not self.no_store:
+                                self._store_transition(obs_, action, reward_, new_obs_, done, info)
                             obs = new_obs
                             # Save the unnormalized observation
                             if self._vec_normalize_env is not None:
@@ -998,6 +1007,14 @@ class DDPG(OffPolicyRLModel):
                                     eval_episode_rewards.append(eval_episode_reward)
                                     eval_episode_rewards_history.append(eval_episode_reward)
                                     eval_episode_reward = 0.
+                        # Save model periodically
+                        if total_steps % save_interval == 0:
+                            if save_path:
+                                load_path = save_path + "%d" % epoch
+                                self.save(load_path)
+                                print("model saved!")
+                                self.save_replay_buffer(save_path + "%d" % epoch + "replay_buffer.pkl")
+                                print("buffer saved!")
 
                     mpi_size = MPI.COMM_WORLD.Get_size()
 
@@ -1011,6 +1028,13 @@ class DDPG(OffPolicyRLModel):
                     stats = self._get_stats()
                     combined_stats = stats.copy()
                     combined_stats['rollout/return'] = np.mean(epoch_episode_rewards)
+                    returns_save_path = os.path.join(save_path, 'returns.npy')
+                    if not os.path.isfile(returns_save_path):
+                        np.save(returns_save_path, np.mean(epoch_episode_rewards))
+                    else:
+                        returns_all = np.load(returns_save_path)
+                        returns_new = np.append(returns_all, np.mean(epoch_episode_rewards))
+                        np.save(returns_save_path, returns_new)
                     combined_stats['rollout/return_history'] = np.mean(episode_rewards_history)
                     combined_stats['rollout/episode_steps'] = np.mean(epoch_episode_steps)
                     combined_stats['rollout/actions_mean'] = np.mean(epoch_actions)
@@ -1052,12 +1076,22 @@ class DDPG(OffPolicyRLModel):
 
                     # Total statistics.
                     combined_stats['total/epochs'] = epoch + 1
+                    epoch += 1
                     combined_stats['total/steps'] = step
 
                     for key in sorted(combined_stats.keys()):
                         logger.record_tabular(key, combined_stats[key])
                     if len(episode_successes) > 0:
                         logger.logkv("success rate", np.mean(episode_successes[-100:]))
+                        # save the success rate as numpy file
+                        success_rate = np.mean(episode_successes[-100:])
+                        success_save_path = os.path.join(save_path, 'success_rate.npy')
+                        if not os.path.isfile(success_save_path):
+                            np.save(success_save_path, success_rate)
+                        else:
+                            success_all = np.load(success_save_path)
+                            success_new = np.append(success_all, success_rate)
+                            np.save(success_save_path, success_new)
                     logger.dump_tabular()
                     logger.info('')
                     logdir = logger.get_dir()
@@ -1098,6 +1132,11 @@ class DDPG(OffPolicyRLModel):
                 self.target_params +
                 self.obs_rms_params +
                 self.ret_rms_params)
+
+    def save_replay_buffer(self, path):
+        print(self.replay_buffer.replay_buffer)
+        with open(path, 'wb') as output:
+            pickle.dump(self.replay_buffer.replay_buffer, output, pickle.HIGHEST_PROTOCOL)
 
     def save(self, save_path, cloudpickle=False):
         data = {

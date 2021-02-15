@@ -11,6 +11,8 @@ from stable_baselines.common.math_util import safe_mean, unscale_action, scale_a
 from stable_baselines.common.schedules import get_schedule_fn
 from stable_baselines.common.buffers import ReplayBuffer
 from stable_baselines.td3.policies import TD3Policy
+import os
+import pickle
 
 
 class TD3(OffPolicyRLModel):
@@ -61,7 +63,8 @@ class TD3(OffPolicyRLModel):
                  target_policy_noise=0.2, target_noise_clip=0.5,
                  random_exploration=0.0, verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None,
-                 full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None):
+                 full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None, rb_path=None,
+                 no_store=False, load_rb=False):
 
         super(TD3, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose,
                                   policy_base=TD3Policy, requires_vec_env=False, policy_kwargs=policy_kwargs,
@@ -80,6 +83,9 @@ class TD3(OffPolicyRLModel):
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
+        self.rb_path = rb_path
+        self.no_store = no_store
+        self.load_rb = load_rb
 
         self.graph = None
         self.replay_buffer = None
@@ -127,6 +133,10 @@ class TD3(OffPolicyRLModel):
                 self.sess = tf_util.make_session(num_cpu=self.n_cpu_tf_sess, graph=self.graph)
 
                 self.replay_buffer = ReplayBuffer(self.buffer_size)
+                if self.load_rb:
+                    with open(self.rb_path, 'rb') as replay_buffer:
+                        self.replay_buffer = pickle.load(replay_buffer)
+                        print(len(self.replay_buffer.storage))
 
                 with tf.variable_scope("input", reuse=False):
                     # Create policy and target TF objects
@@ -273,7 +283,8 @@ class TD3(OffPolicyRLModel):
         return qf1_loss, qf2_loss
 
     def learn(self, total_timesteps, callback=None,
-              log_interval=4, tb_log_name="TD3", reset_num_timesteps=True, replay_wrapper=None):
+              log_interval=1, tb_log_name="TD3", reset_num_timesteps=True, replay_wrapper=None
+              , save_path=None, save_interval=None):
 
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
         callback = self._init_callback(callback)
@@ -346,7 +357,8 @@ class TD3(OffPolicyRLModel):
                     obs_, new_obs_, reward_ = obs, new_obs, reward
 
                 # Store transition in the replay buffer.
-                self.replay_buffer_add(obs_, action, reward_, new_obs_, done, info)
+                if not self.no_store:
+                    self.replay_buffer_add(obs_, action, reward_, new_obs_, done, info)
                 obs = new_obs
                 # Save the unnormalized observation
                 if self._vec_normalize_env is not None:
@@ -415,6 +427,13 @@ class TD3(OffPolicyRLModel):
                     fps = int(step / (time.time() - start_time))
                     logger.logkv("episodes", num_episodes)
                     logger.logkv("mean 100 episode reward", mean_reward)
+                    returns_save_path = os.path.join(save_path, 'returns.npy')
+                    if not os.path.isfile(returns_save_path):
+                        np.save(returns_save_path, mean_reward)
+                    else:
+                        returns_all = np.load(returns_save_path)
+                        returns_new = np.append(returns_all, mean_reward)
+                        np.save(returns_save_path, returns_new)
                     if len(self.ep_info_buf) > 0 and len(self.ep_info_buf[0]) > 0:
                         logger.logkv('ep_rewmean', safe_mean([ep_info['r'] for ep_info in self.ep_info_buf]))
                         logger.logkv('eplenmean', safe_mean([ep_info['l'] for ep_info in self.ep_info_buf]))
@@ -424,6 +443,15 @@ class TD3(OffPolicyRLModel):
                     logger.logkv('time_elapsed', int(time.time() - start_time))
                     if len(episode_successes) > 0:
                         logger.logkv("success rate", np.mean(episode_successes[-100:]))
+                        # save the success rate as numpy file
+                        success_rate = np.mean(episode_successes[-100:])
+                        success_save_path = os.path.join(save_path, 'success_rate.npy')
+                        if not os.path.isfile(success_save_path):
+                            np.save(success_save_path, success_rate)
+                        else:
+                            success_all = np.load(success_save_path)
+                            success_new = np.append(success_all, success_rate)
+                            np.save(success_save_path, success_new)
                     if len(infos_values) > 0:
                         for (name, val) in zip(self.infos_names, infos_values):
                             logger.logkv(name, val)
@@ -431,6 +459,13 @@ class TD3(OffPolicyRLModel):
                     logger.dumpkvs()
                     # Reset infos:
                     infos_values = []
+                if done and num_episodes % save_interval == 0:
+                    if save_path:
+                        load_path = save_path + "%d" % num_episodes
+                        self.save(load_path)
+                        print("model saved!")
+                        # self.save_replay_buffer(save_path + "%d" % num_episodes + "replay_buffer.pkl")
+                        # print("buffer saved!")
 
             callback.on_training_end()
             return self
@@ -467,6 +502,10 @@ class TD3(OffPolicyRLModel):
         return (self.params +
                 self.target_params)
 
+    def save_replay_buffer(self, path):
+        with open(path, 'wb') as output:
+            pickle.dump(self.replay_buffer.replay_buffer, output, pickle.HIGHEST_PROTOCOL)
+
     def save(self, save_path, cloudpickle=False):
         data = {
             "learning_rate": self.learning_rate,
@@ -478,7 +517,7 @@ class TD3(OffPolicyRLModel):
             # Should we also store the replay buffer?
             # this may lead to high memory usage
             # with all transition inside
-            # "replay_buffer": self.replay_buffer
+            "replay_buffer": self.replay_buffer.replay_buffer,
             "policy_delay": self.policy_delay,
             "target_noise_clip": self.target_noise_clip,
             "target_policy_noise": self.target_policy_noise,

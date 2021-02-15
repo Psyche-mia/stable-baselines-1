@@ -106,11 +106,11 @@ class HER(BaseRLModel):
     def setup_model(self):
         pass
 
-    def learn(self, total_timesteps, callback=None, log_interval=100, tb_log_name="HER",
-              reset_num_timesteps=True):
+    def learn(self, total_timesteps, callback=None, log_interval=None, tb_log_name="HER",
+              reset_num_timesteps=True, save_path=None, save_interval=None):
         return self.model.learn(total_timesteps, callback=callback, log_interval=log_interval,
                                 tb_log_name=tb_log_name, reset_num_timesteps=reset_num_timesteps,
-                                replay_wrapper=self.replay_wrapper)
+                                replay_wrapper=self.replay_wrapper, save_path=save_path, save_interval=save_interval)
 
     def _check_obs(self, observation):
         if isinstance(observation, dict):
